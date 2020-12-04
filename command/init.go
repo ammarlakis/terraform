@@ -285,7 +285,7 @@ func (c *InitCommand) Run(args []string) int {
 	}
 
 	// Now that we have loaded all modules, check the module tree for missing providers.
-	providersOutput, providersAbort, providerDiags := c.getProviders(config, state, flagUpgrade, flagPluginPath)
+	providersOutput, providersAbort, providerDiags := c.getProviders(config, state, flagUpgrade, flagPluginPath, c.getPlugins)
 	diags = diags.Append(providerDiags)
 	if providersAbort || providerDiags.HasErrors() {
 		c.showDiagnostics(diags)
@@ -416,7 +416,7 @@ the backend configuration is present and valid.
 
 // Load the complete module tree, and fetch any missing providers.
 // This method outputs its own Ui.
-func (c *InitCommand) getProviders(config *configs.Config, state *states.State, upgrade bool, pluginDirs []string) (output, abort bool, diags tfdiags.Diagnostics) {
+func (c *InitCommand) getProviders(config *configs.Config, state *states.State, upgrade bool, pluginDirs []string, getPlugins bool) (output, abort bool, diags tfdiags.Diagnostics) {
 	// First we'll collect all the provider dependencies we can see in the
 	// configuration and the state.
 	reqs, hclDiags := config.ProviderRequirements()
@@ -450,16 +450,19 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 	}
 
 	var inst *providercache.Installer
-	if len(pluginDirs) == 0 {
+	if getPlugins {
 		// By default we use a source that looks for providers in all of the
 		// standard locations, possibly customized by the user in CLI config.
 		inst = c.providerInstaller()
 	} else {
-		// If the user passes at least one -plugin-dir then that circumvents
-		// the usual sources and forces Terraform to consult only the given
-		// directories. Anything not available in one of those directories
-		// is not available for installation.
-		source := c.providerCustomLocalDirectorySource(pluginDirs)
+		source := c.providerInstallerLocalSource()
+		if len(pluginDirs) > 0 {
+			// If the user passes at least one -plugin-dir then that circumvents
+			// the usual sources and forces Terraform to consult only the given
+			// directories. Anything not available in one of those directories
+			// is not available for installation.
+			source = c.providerCustomLocalDirectorySource(pluginDirs)
+		}
 		inst = c.providerInstallerCustomSource(source)
 
 		// The default (or configured) search paths are logged earlier, in provider_source.go
@@ -581,13 +584,31 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 				// the end, by checking ctx.Err().
 
 			default:
-				diags = diags.Append(tfdiags.Sourceless(
-					tfdiags.Error,
-					"Failed to query available provider packages",
-					fmt.Sprintf("Could not retrieve the list of available versions for provider %s: %s",
-						provider.ForDisplay(), err,
-					),
-				))
+				if getPlugins {
+					diags = diags.Append(tfdiags.Sourceless(
+						tfdiags.Error,
+						"Failed to query available provider packages",
+						fmt.Sprintf("Could not retrieve the list of available versions for provider %s: %s",
+							provider.ForDisplay(), err,
+						),
+					))
+				} else {
+					diags = diags.Append(tfdiags.Sourceless(
+						tfdiags.Error,
+						"Missing required provider",
+						fmt.Sprintf(`The following provider is not met by the currently-installed
+provider plugins:
+
+* %s
+
+Terraform can automatically download and install plugins to meet the given
+constraints, but this step was skipped due to the use of -get-plugins=false
+and/or -plugin-dir on the command line.`,
+							provider.ForDisplay(),
+						),
+					))
+				}
+
 			}
 
 		},
